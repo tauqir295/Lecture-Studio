@@ -1,0 +1,7 @@
+{
+  "id": "linux",
+  "name": "Linux & DevOps",
+  "description": "Pronunciations for shell commands and Linux paths.",
+  "keywords": ["Linux", "bash", "sudo", "systemd", "apt", "chmod", "grep", "kernel", "Ubuntu", "Debian", "shell", "SSH", "cron", "Docker", "Kubernetes"],
+  "pronunciations": {"sudo": "sue doo", "chmod": "C H mod", "chown": "C H own", "systemd": "system D", "/etc": "slash E T C", "/usr": "slash user", "SSH": "S S H", "grep": "grep", "kubectl": "cube control", "nginx": "engine X", "YAML": "yammel"}
+}

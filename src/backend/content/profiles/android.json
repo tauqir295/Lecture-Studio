@@ -1,0 +1,7 @@
+{
+  "id": "android",
+  "name": "Android",
+  "description": "Pronunciations for Android / Kotlin development terms.",
+  "keywords": ["Android", "Kotlin", "Jetpack", "Compose", "Gradle", "Activity", "Fragment", "ViewModel", "APK", "AAB", "adb", "Room", "Hilt", "AndroidManifest"],
+  "pronunciations": {"APK": "A P K", "AAB": "A A B", "adb": "A D B", "SDK": "S D K", "NDK": "N D K", "AVD": "A V D", "AndroidManifest.xml": "Android manifest dot X M L", "build.gradle": "build dot gradle"}
+}

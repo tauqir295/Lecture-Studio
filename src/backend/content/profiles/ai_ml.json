@@ -1,0 +1,7 @@
+{
+  "id": "ai_ml",
+  "name": "AI & Machine Learning",
+  "description": "Pronunciations for AI / ML acronyms.",
+  "keywords": ["machine learning", "neural network", "LLM", "transformer", "PyTorch", "TensorFlow", "embedding", "gradient", "dataset", "fine-tuning", "inference", "GPU", "token"],
+  "pronunciations": {"LLM": "L L M", "LLMs": "L L Ms", "RAG": "rag", "GPU": "G P U", "CUDA": "cuda", "ONNX": "onyx", "PyTorch": "pie torch", "NumPy": "num pie", "SciPy": "sigh pie", "ReLU": "ray loo", "RLHF": "R L H F"}
+}

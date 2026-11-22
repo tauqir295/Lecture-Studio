@@ -1,0 +1,11 @@
+{
+  "id": "sap",
+  "name": "SAP (BTP, CAP, S/4HANA)",
+  "description": "Pronunciations for common SAP acronyms and file names.",
+  "keywords": ["SAP", "BTP", "S/4HANA", "HANA", "CAP", "CDS", "Fiori", "ABAP", "XSUAA", "Cloud Foundry", "subaccount", "OData", "RAP", "Kyma", "BTPEA", "CPEA"],
+  "pronunciations": {
+    "JWT": "J W T", "XSUAA": "X S U A A", "OData": "Oh Data", "mta.yaml": "M T A dot yaml",
+    "VCAP_SERVICES": "V cap services", "HDI": "H D I", "BTPEA": "B T P E A", "CPEA": "C P E A",
+    "S/4HANA": "S 4 HANA", "BTP": "B T P", "CDS": "C D S", "IAS": "I A S", "ECC": "E C C"
+  }
+}

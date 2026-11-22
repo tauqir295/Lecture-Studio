@@ -1,0 +1,7 @@
+{
+  "id": "web_programming",
+  "name": "Programming & Web",
+  "description": "Pronunciations for general programming and web terms.",
+  "keywords": ["function", "class", "API", "JavaScript", "TypeScript", "Python", "Java", "HTTP", "REST", "JSON", "npm", "React", "SQL", "compiler", "Git"],
+  "pronunciations": {"JSON": "jay son", "SQL": "sequel", "npm": "N P M", "HTTP": "H T T P", "HTTPS": "H T T P S", "URL": "U R L", "UI": "U I", "CLI": "C L I", "IDE": "I D E", "OAuth": "oh auth", "README.md": "readme dot M D", "package.json": "package dot jay son"}
+}

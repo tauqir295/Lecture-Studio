@@ -1,0 +1,53 @@
+# --- Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Virtual environments
+.venv/
+venv/
+env/
+
+# --- Local configuration / secrets (never commit)
+.env
+.env.*
+*.local.json
+.claude/settings.local.json
+*.pem
+*.key
+
+# --- Downloaded TTS models (large; fetched by the app or manually, see docs/TTS.md)
+models/**
+!models/
+!models/README.md
+
+# --- User workspaces and generated output
+Projects/
+output/
+docs/
+*.part
+*.log
+logs/
+cache/
+
+# --- OS / editor files (macOS, Windows, Linux)
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*~
+.directory
+.idea/
+.vscode/
+*.swp

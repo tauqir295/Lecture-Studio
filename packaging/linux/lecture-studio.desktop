@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Lecture Studio
+Comment=Turn documents into narrated tutorial videos, offline
+# Replace /path/to/Lecture-Studio with your checkout (see README: Linux desktop entry)
+Exec=/path/to/Lecture-Studio/.venv/bin/python /path/to/Lecture-Studio/main.py
+Icon=lecture-studio
+Terminal=false
+Categories=AudioVideo;Education;Office;
+StartupWMClass=lecture-studio
