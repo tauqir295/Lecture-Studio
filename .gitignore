@@ -32,7 +32,9 @@ models/**
 
 # --- User workspaces and generated output
 Projects/
+/Audio/
 output/
+inputs/
 docs/
 *.part
 *.log

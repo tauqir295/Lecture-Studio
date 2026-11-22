@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from src.backend.tts import service as tts
 from src.backend.video import transitions as tx
@@ -96,6 +96,54 @@ def _prep(W: int, H: int) -> str:
             f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
 
 
+def still_graph(layout: str, W: int, H: int) -> str:
+    """filter_complex from [0:v] (slide image) to [v]: the static frame for a layout.
+    ken_burns uses the blurred fill as its base so zooming never reveals bars."""
+    if layout in ("fill_blur", "ken_burns"):
+        return (f"[0:v]split[bg0][fg0];"
+                f"[bg0]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                f"boxblur=luma_radius=min(h\\,w)/20:luma_power=2,eq=brightness=-0.12[bg];"
+                f"[fg0]scale={W}:{H}:force_original_aspect_ratio=decrease[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[v]")
+    return f"[0:v]{_prep(W, H)}[v]"
+
+
+def prepare_still(ff: str, img: Path, out: Path, layout: str, W: int, H: int) -> Path:
+    """Compose the slide's static frame once (cheap to loop afterwards)."""
+    _run([ff, "-y", "-loglevel", "error", "-i", str(img), "-filter_complex", still_graph(layout, W, H),
+          "-map", "[v]", "-frames:v", "1", str(out)])
+    return out
+
+
+def body_graph(layout: str, overlay: str, W: int, H: int, fps: float, frames: int,
+               t0: float, total: float, zoom_in: bool = True) -> str:
+    """filter_complex for a slide body: [0:v] = looped prepared still, [1:a] = its narration (waveform)."""
+    if layout == "ken_burns":
+        # still is prepared at 2x so the slow zoom stays smooth; zoom 1.00 <-> 1.08 across the slide
+        z = f"1+0.08*on/{max(frames - 1, 1)}" if zoom_in else f"1.08-0.08*on/{max(frames - 1, 1)}"
+        g = (f"[0:v]zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={fps},"
+             f"setsar=1,format=yuv420p[base]")
+    else:
+        g = "[0:v]setsar=1,format=yuv420p[base]"
+    if overlay == "progress" and total > 0:
+        h = max(H // 135, 4)
+        g += (f";[base]drawbox=x=0:y=ih-{h}:w='max(1,iw*({t0:.3f}+t)/{total:.3f})':h={h}:"
+              f"color=white@0.85:t=fill[v]")
+    elif overlay == "waveform":
+        wh = max(H // 8, 40)
+        g += (f";[1:a]aformat=channel_layouts=mono,showwaves=s={W}x{wh}:mode=cline:draw=full:scale=sqrt:rate={fps}:"
+              f"colors=white@0.85,format=rgba[wv];[base][wv]overlay=0:H-h-{max(H // 30, 8)}:format=auto[v]")
+    else:
+        g = g.replace("[base]", "[v]")
+    return g
+
+
+def _frame_at(ff: str, clip: Path, index: int, out: Path) -> Path:
+    _run([ff, "-y", "-loglevel", "error", "-i", str(clip), "-vf", f"select=eq(n\\,{index})",
+          "-fps_mode", "passthrough", "-frames:v", "1", str(out)])
+    return out
+
+
 def _slide_image(project: Project, slide_id: str, number: int) -> Path:
     slide = project.get_slide_by_id(slide_id)
     img = Path(project.project_dir) / (slide.image_path or "") if slide else None
@@ -159,6 +207,12 @@ def transition_preview_frames(project: Project, from_slide_id: str, to_slide_id:
     a = _slide_image(project, from_slide_id, 0)
     b = _slide_image(project, to_slide_id, 0)
     hold_n = max(int(round(hold * fps)), 1)
+    layout = vc.layout if vc.layout in ("fill_blur", "ken_burns") else "fit"
+    tmp = None
+    if layout != "fit":                       # compose the layout's frames first (zoom start frame for ken_burns)
+        tmp = Path(tempfile.mkdtemp(prefix="tpreview_"))
+        a = prepare_still(ff, a, tmp / "a.png", layout, w, h)
+        b = prepare_still(ff, b, tmp / "b.png", layout, w, h)
 
     def raw(cmd: List[str], n: int) -> List[bytes]:
         proc = subprocess.run(cmd + ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=120,
@@ -172,12 +226,41 @@ def transition_preview_frames(project: Project, from_slide_id: str, to_slide_id:
     def still(img: Path) -> bytes:
         return raw([ff, "-loglevel", "error", "-i", str(img), "-vf", _prep(w, h), "-frames:v", "1"], 1)[0]
 
-    first, last = still(a), still(b)
-    n = tx.frames_for(seconds, fps)
-    mid: List[bytes] = []
-    if key != tx.NONE and n > 0:
-        mid = raw(transition_cmd(ff, a, b, key, seconds, n, w, h, fps), n)
+    try:
+        first, last = still(a), still(b)
+        n = tx.frames_for(seconds, fps)
+        mid: List[bytes] = []
+        if key != tx.NONE and n > 0:
+            mid = raw(transition_cmd(ff, a, b, key, seconds, n, w, h, fps), n)
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
     return [first] * hold_n + mid + [last] * hold_n, w, h, fps
+
+
+def layout_preview_frame(project: Project, slide_id: str, width: int = 480) -> Tuple[bytes, int, int]:
+    """One RGB frame of a slide as it will appear with the project's frame shape, layout and overlay
+    (overlay drawn at its midpoint). Returns (rgb bytes, width, height)."""
+    ff = ffmpeg_path()
+    if not ff:
+        raise PipelineError("ffmpeg not found.")
+    vc = project.settings
+    w = max(int(width) // 2 * 2, 2)
+    h = max(int(round(w * vc.height / vc.width)) // 2 * 2, 2)
+    img = _slide_image(project, slide_id, 0)
+    graph = still_graph(vc.layout if vc.layout in ("fill_blur", "ken_burns") else "fit", w, h)
+    if vc.overlay == "progress":
+        bh = max(h // 135, 2)
+        graph = graph[:-3] + f"[s];[s]drawbox=x=0:y=ih-{bh}:w=iw/2:h={bh}:color=white@0.85:t=fill[v]"
+    elif vc.overlay == "waveform":
+        graph = (graph[:-3] + f"[s];sine=f=3:d=1,aformat=channel_layouts=mono,showwavespic=s={w}x{max(h // 8, 12)}:"
+                 f"colors=white@0.85,format=rgba[wv];[s][wv]overlay=0:H-h-{max(h // 30, 2)}[v]")
+    proc = subprocess.run([ff, "-loglevel", "error", "-i", str(img), "-filter_complex", graph, "-map", "[v]",
+                           "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                          capture_output=True, timeout=60, **no_window_kwargs())
+    if proc.returncode != 0 or len(proc.stdout) < w * h * 3:
+        raise PipelineError(f"Preview failed: {proc.stderr.decode(errors='replace').strip()[-400:]}")
+    return proc.stdout[:w * h * 3], w, h
 
 
 # ------------------------------------------------------------------ subtitles
@@ -280,23 +363,19 @@ def generate_video(
     (root / "cache").mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="render_", dir=root / "cache"))
     try:
-        clips, wavs, prev_img = [], [], None
+        layout = vcfg.layout if vcfg.layout in ("fit", "fill_blur", "ken_burns") else "fit"
+        overlay = vcfg.overlay if vcfg.overlay in ("none", "waveform", "progress") else "none"
+        simple = layout == "fit" and overlay == "none"       # transitions can use the slide images directly
+        clips, wavs, prev_img, prev_body, prev_bf = [], [], None, None, 0
+        t_cursor = 0.0
         for i, st in enumerate(plan.slides, 1):
             if cancel_check():
                 raise Cancelled("Video generation cancelled.")
             img = _slide_image(project, st.slide_id, st.slide_number)
             tf = tx.frames_for(st.transition_seconds, fps)
             bf = tx.frames_for(st.narration_seconds + st.hold_seconds, fps)
-            if tf > 0 and prev_img is not None:
-                clip = work / f"t_{i:04d}.mp4"
-                _run(transition_cmd(ff, prev_img, img, st.transition_type, st.transition_seconds, tf, W, H, fps)
-                     + _VENC + [str(clip)])
-                clips.append(clip)
-            clip = work / f"s_{i:04d}.mp4"
-            _run([ff, "-y", "-loglevel", "error", "-loop", "1", "-framerate", str(fps), "-i", str(img),
-                  "-vf", _prep(W, H), "-frames:v", str(bf)] + _VENC + [str(clip)])
-            clips.append(clip)
 
+            # audio first: the waveform overlay draws from it
             wav = work / f"a_{i:04d}.wav"
             total_samples = round((tf + bf) / fps * _SR)
             delay = round(tf / fps * _SR)
@@ -309,7 +388,37 @@ def generate_video(
                     "-c:a", "pcm_s16le", str(wav)]
             _run(cmd)
             wavs.append(wav)
-            prev_img = img
+
+            # slide body
+            body = work / f"s_{i:04d}.mp4"
+            t_body = t_cursor + tf / fps
+            if simple:
+                _run([ff, "-y", "-loglevel", "error", "-loop", "1", "-framerate", str(fps), "-i", str(img),
+                      "-vf", _prep(W, H), "-frames:v", str(bf)] + _VENC + [str(body)])
+            else:
+                scale = 2 if layout == "ken_burns" else 1
+                still = prepare_still(ff, img, work / f"still_{i:04d}.png", layout, W * scale, H * scale)
+                graph = body_graph(layout, overlay, W, H, fps, bf, t_body, plan.total_seconds, zoom_in=i % 2 == 1)
+                cmd = [ff, "-y", "-loglevel", "error", "-loop", "1", "-framerate", str(fps), "-i", str(still)]
+                if overlay == "waveform":
+                    cmd += ["-ss", f"{tf / fps:.6f}", "-i", str(wav)]
+                _run(cmd + ["-filter_complex", graph, "-map", "[v]", "-frames:v", str(bf), "-r", str(fps)]
+                     + _VENC + [str(body)])
+
+            # incoming transition (inserted before the body)
+            if tf > 0 and prev_img is not None:
+                clip = work / f"t_{i:04d}.mp4"
+                if simple:
+                    a_img, b_img = prev_img, img
+                else:                                     # exact boundary frames: no jump after zoom/overlay
+                    a_img = _frame_at(ff, prev_body, prev_bf - 1, work / f"last_{i - 1:04d}.png")
+                    b_img = _frame_at(ff, body, 0, work / f"first_{i:04d}.png")
+                _run(transition_cmd(ff, a_img, b_img, st.transition_type, st.transition_seconds, tf, W, H, fps)
+                     + _VENC + [str(clip)])
+                clips.append(clip)
+            clips.append(body)
+            prev_img, prev_body, prev_bf = img, body, bf
+            t_cursor += (tf + bf) / fps
             progress(40 + int(50 * i / len(plan.slides)), f"Rendering slide {st.slide_number} ({i}/{len(plan.slides)})")
 
         progress(92, "Joining segments and adding subtitles…")
@@ -335,7 +444,9 @@ def generate_video(
 
     report = {
         "video": mp4.name, "subtitles": srt.name, "created": datetime.now().isoformat(timespec="seconds"),
-        "settings": cfg.to_dict(), "transitions": _transition_settings(vcfg), "speed_used": plan.speed, "tts_engine": project.settings.tts_engine,
+        "settings": cfg.to_dict(), "transitions": _transition_settings(vcfg),
+        "video_type": vcfg.video_type, "layout": vcfg.layout, "overlay": vcfg.overlay,
+        "frame": f"{W}x{H}", "speed_used": plan.speed, "tts_engine": project.settings.tts_engine,
         "total_seconds": round(plan.total_seconds, 2), "narration_seconds": round(plan.narration_seconds, 2),
         "slide_count": len(plan.slides), "warnings": warnings,
         "timeline": [{"slide": t.slide_number, "title": t.title, "narration": t.narration_seconds,

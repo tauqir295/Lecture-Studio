@@ -11,6 +11,7 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 
+from src.backend.tts import emotion
 from src.backend.tts.registry import get_engine
 from src.models.narration import SlideNarration
 from src.models.project import Project
@@ -25,9 +26,18 @@ class TTSOptions:
     speed: float = 1.0
     sentence_pause: float = 0.3
     clause_pause: float = 0.1
+    emotion: str = emotion.NEUTRAL
+
+    def as_dict(self) -> Dict:
+        """Options as stored in audio metadata / cache keys. Neutral style is left out so audio made
+        before styles existed is still recognised as up to date."""
+        d = asdict(self)
+        if d.get("emotion") == emotion.NEUTRAL:
+            d.pop("emotion")
+        return d
 
     def key(self, text: str) -> str:
-        payload = json.dumps({**asdict(self), "text": text}, sort_keys=True)
+        payload = json.dumps({**self.as_dict(), "text": text}, sort_keys=True)
         return hashlib.sha1(payload.encode()).hexdigest()[:20]
 
 
@@ -52,7 +62,7 @@ def spoken_text(project: Project, script: str) -> str:
 
 
 # ------------------------------------------------------------------ options
-def global_options(project: Project, speaker: Optional[str] = None) -> TTSOptions:
+def global_options(project: Project, speaker: Optional[str] = None, style: Optional[str] = None) -> TTSOptions:
     cfg = project.settings
     eng = get_engine(cfg.tts_engine)
     spk = speaker or cfg.voice_id
@@ -60,7 +70,8 @@ def global_options(project: Project, speaker: Optional[str] = None) -> TTSOption
         spk = eng.default_speaker()
     pauses = eng.capabilities.pauses
     return TTSOptions(eng.id, spk, float(cfg.speech_speed),
-                      cfg.sentence_pause if pauses else 0.0, cfg.clause_pause if pauses else 0.0)
+                      cfg.sentence_pause if pauses else 0.0, cfg.clause_pause if pauses else 0.0,
+                      emotion.get(style or cfg.emotion).key)
 
 
 def slide_speaker(project: Project, narration: SlideNarration) -> str:
@@ -69,8 +80,15 @@ def slide_speaker(project: Project, narration: SlideNarration) -> str:
     return project.settings.voice_id
 
 
+def slide_emotion(project: Project, narration: Optional[SlideNarration]) -> str:
+    """The slide's own delivery style, else the project's."""
+    if narration is not None and narration.emotion:
+        return emotion.get(narration.emotion).key
+    return emotion.get(project.settings.emotion).key
+
+
 def options_for(project: Project, narration: SlideNarration) -> TTSOptions:
-    return global_options(project, slide_speaker(project, narration))
+    return global_options(project, slide_speaker(project, narration), slide_emotion(project, narration))
 
 
 # ------------------------------------------------------------------ synthesis
@@ -94,7 +112,11 @@ def synthesize_cached(text: str, opts: TTSOptions, cache_dir: Path) -> Path:
     if out.is_file() and out.stat().st_size > 44:
         return out
     eng = get_engine(opts.engine)
-    audio, sr = eng.synthesize(text, opts.speaker, opts.speed, opts.sentence_pause, opts.clause_pause)
+    a = emotion.apply(opts.emotion, eng, opts.speed, opts.sentence_pause, opts.clause_pause)
+    audio, sr = eng.synthesize(text, opts.speaker, a.speed, a.sentence_pause, a.clause_pause,
+                               a.expressiveness, a.native_style)
+    if a.gain != 1.0:
+        audio = np.clip(np.asarray(audio, dtype=np.float32) * a.gain, -1.0, 1.0)
     if audio.size == 0:
         audio = np.zeros(int(sr * 0.2), dtype=np.float32)
     _write_wav(out, audio, sr)
@@ -111,14 +133,15 @@ def sample_audio(project: Project, speaker: Optional[str] = None, engine: Option
         eng = get_engine(engine)
         opts = TTSOptions(eng.id, speaker or eng.default_speaker(), opts.speed,
                           opts.sentence_pause if eng.capabilities.pauses else 0.0,
-                          opts.clause_pause if eng.capabilities.pauses else 0.0)
+                          opts.clause_pause if eng.capabilities.pauses else 0.0, opts.emotion)
     text = get_engine(opts.engine).sample_sentence(opts.speaker)
     return synthesize_cached(text, opts, cache_dir(project) / "samples")
 
 
-def preview_audio(project: Project, script: str, speaker: Optional[str] = None) -> Path:
-    """Speak arbitrary (possibly unsaved) narration text with the given/global speaker."""
-    opts = global_options(project, speaker)
+def preview_audio(project: Project, script: str, speaker: Optional[str] = None,
+                  style: Optional[str] = None) -> Path:
+    """Speak arbitrary (possibly unsaved) narration text with the given/global speaker and style."""
+    opts = global_options(project, speaker, style)
     return synthesize_cached(spoken_text(project, script), opts, cache_dir(project))
 
 
@@ -126,7 +149,7 @@ def preview_audio(project: Project, script: str, speaker: Optional[str] = None) 
 def _meta(project: Project, narration: SlideNarration) -> Dict:
     opts = options_for(project, narration)
     text = spoken_text(project, narration.script)
-    return {**asdict(opts), "text_sha": hashlib.sha1(text.encode()).hexdigest()[:16]}
+    return {**opts.as_dict(), "text_sha": hashlib.sha1(text.encode()).hexdigest()[:16]}
 
 
 def slide_audio_path(project: Project, narration: SlideNarration) -> Optional[Path]:

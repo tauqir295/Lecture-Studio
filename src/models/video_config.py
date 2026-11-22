@@ -26,6 +26,10 @@ class VideoConfig:
     speech_speed: float = 1.0
     speech_volume: float = 1.0
     speaker_mode: str = "single"            # "single" | "per_slide"
+    emotion: str = "neutral"                # default delivery style (src/backend/tts/emotion.py)
+    video_type: str = "tutorial"            # src/backend/video/video_types.py
+    layout: str = "fit"                     # how slides fill the frame: fit | fill_blur | ken_burns
+    overlay: str = "none"                   # extra visuals on slides: none | waveform | progress
     sentence_pause: float = 0.3             # seconds, engines with pause support
     clause_pause: float = 0.1
     # term -> spoken form; seeded from the project's content profile (see src/backend/content/profiles/)

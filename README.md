@@ -48,8 +48,57 @@ model and renders an MP4 with subtitles and slideshow-style transitions.
 - **One speaker for the whole presentation, or a different speaker per slide** (Speaker Assignment tab).
 - Generate or regenerate audio per slide, for selected slides, for missing/outdated slides, or for all slides. Audio is marked *outdated* when the text or voice changes.
 - Speed, sentence/comma pauses (Kokoro) and a pronunciation dictionary.
+- **Delivery styles (emotional narration):** Neutral, Friendly, Enthusiastic, Calm, Serious, Storytelling, Dramatic and Inspirational.
+  - Set a project style, and override it per slide with the *Style* box above the script.
+  - **▶ Preview Narration** uses the slide's style before you generate audio.
+  - A style uses only the controls the selected model has, and the panel says which ones apply:
+    - **Kokoro-82M / macOS voices:** no emotion input, so a style changes pace and pauses.
+    - **Piper voices:** pace plus intonation variation.
+    - A future model with built-in styles receives the style name directly.
+  - Changing a style marks the affected audio as outdated. Neutral leaves existing audio untouched.
+
+**Audio Studio** (standalone; no PDF, slides or project needed)
+- Type, paste or import (`.txt`, `.md`) narration for any purpose: podcasts, audiobooks, voice-overs or announcements.
+- **Emotion tags:** `[happy]` `[sad]` `[excited]` `[angry]` `[calm]` `[fearful]` `[whispering]` `[dramatic]` `[hopeful]` `[serious]` `[storytelling]` `[satisfied]`, plus `[friendly]`, `[enthusiastic]`, `[inspirational]`, `[neutral]` and aliases such as `[whisper]` and `[joyful]`.
+  - A tag at the start of a paragraph covers the whole paragraph. A tag inside a paragraph applies from that point until the next tag or the paragraph's end.
+  - `[/]` returns to the paragraph's starting style.
+  - `[pause 2s]` inserts silence, up to 10 s.
+  - Unknown tags are reported. Other bracketed text, like `[1]`, is read normally.
+  - **Insert / wrap selection** adds a tag for you.
+- **How tags sound:** a tag uses the controls the selected model has: pace, pauses, intonation variation (Piper) and volume.
+  - For example, `[whispering]` is quieter and softer, but not a true whisper. The current local models have no emotion input, and the panel says so.
+- **Voices:** all TTS models, including your imported custom models, with speaker selection and **▶ Play Sample**.
+- **Speech settings:** speed, sentence/comma pauses (where supported), gaps between sentences and paragraphs, and pronunciations.
+- **Partial regeneration:** each sentence is a segment with its own cached audio.
+  - **Generate Audio** synthesizes only new or edited sentences.
+  - **Regenerate Selected** makes a fresh take of chosen segments.
+  - Changing the voice or speed regenerates what it affects.
+- **Preview:** a segment list with style, length and status, a colour-coded waveform (click a segment to play it), **▶ Selected** and **▶ Play All**.
+- **Export:**
+  - Formats: WAV (16/24-bit), FLAC, MP3 (CBR 96–320 kbps or VBR), M4A/AAC, Ogg Vorbis, Opus and ALAC. Only formats the installed ffmpeg can encode are offered.
+  - Settings: sample rate, mono or stereo, and optional loudness normalization to -16 LUFS.
+- Documents are saved in `<workspace>/Audio/<name>/`: `document.json`, segment `cache/` and `exports/`. That folder isn't tracked by git.
 
 **Video Studio**
+- **Video type:** a preset that sets frame shape, layout, overlay, transitions, pacing and delivery style. All values remain editable, and slides and narration text are not changed.
+
+  | Type | Frame | Layout / overlay | Transitions · style |
+  |---|---|---|---|
+  | Educational tutorial / slide lesson (default) | 16:9 | full slide | fade · neutral |
+  | Explainer / animated concept | 16:9 | slow zoom | crossfade · friendly |
+  | Storytelling / documentary | 16:9 | slow zoom | long dissolve · storytelling |
+  | Software tutorial / walkthrough | 16:9 | full slide | cut · neutral, longer reading time |
+  | News / commentary | 16:9 | blurred fill + progress bar | slide left · serious, brisk |
+  | Training / presentation | 16:9 | full slide | crossfade · serious |
+  | Promotional / product | 16:9 | slow zoom | zoom in · enthusiastic, fast |
+  | Short-form vertical | **9:16** | blurred fill + progress bar | slide up · enthusiastic, fast |
+  | Podcast-style | 16:9 | blurred fill + **audio waveform** | crossfade · friendly |
+  | Narrated photo video | 16:9 | slow zoom | dissolve · calm |
+
+  - You can also set the frame (16:9, 9:16, 1:1, 4:5), layout (*fit*, *blurred fill*, *slow zoom*) and overlay (*none*, *audio waveform*, *progress bar*) directly.
+  - **Preview frame** shows a slide as it will look.
+  - "Animated" means a slow zoom, transitions and the waveform; there is no motion graphics or per-element animation.
+  - Narrated photo videos start from a PDF of photos or a Markdown file with images; there is no direct image-folder import.
 - **Slide range:** From/To, with validation.
 - **Target duration:** natural length, 10/20/30/45 min or custom, with a reachable range shown. Narration is never cut. Hold time is adjusted first, then narration speed within your limits.
 - Estimated duration and a timeline (start time, how each slide enters, narration, hold, time on screen). You can step through the slide sequence in the preview.
@@ -188,7 +237,7 @@ After the import, the project is self-contained. The PDF, the manifest and the l
 
 | OS | Status |
 |---|---|
-| **macOS** | **Verified** on macOS 26.7, Intel (x86_64), Python 3.13: full test suite (131 tests) passes and the app starts. Apple Silicon is expected to work (all dependencies ship arm64 wheels) but has **not** been tested. |
+| **macOS** | **Verified** on macOS 26.7, Intel (x86_64), Python 3.13: full test suite (171 tests; the optional real-Piper test is skipped unless configured) passes and the app starts. Apple Silicon is expected to work (all dependencies ship arm64 wheels) but has **not** been tested. |
 | **Windows 10/11** | **Not yet verified.** The code has been audited for Windows: paths use `pathlib`, there are no shell commands, child processes start without console windows, and LibreOffice/ffmpeg are looked up in Program Files. All dependencies publish Windows wheels. Please report results. |
 | **Ubuntu / Linux** | **Not yet verified.** Same audit. Qt needs a few system libraries (see the install steps). |
 
@@ -318,6 +367,11 @@ The renderer is `src/backend/video/pipeline.py`. It uses **ffmpeg** through `ima
 4. **Audio.** One continuous, sample-exact PCM track is built: silence during transitions, then narration, then the hold. It is encoded to AAC once, so narration cannot drift across many slides.
 5. **Subtitles.** Each slide's subtitles start when its narration starts, after the transition, and are written as `.srt` and embedded in the MP4.
 
+**Layouts and overlays:**
+- With *blurred fill* and *slow zoom*, each slide's static frame is composed once and then looped, so per-frame work stays small. *Slow zoom* is prepared at twice the size so the zoom stays smooth, and it alternates between zooming in and out.
+- The progress bar and audio waveform are drawn while the slide body is encoded.
+- With any layout other than *fit*, transitions are built from the real last frame of one slide and the first frame of the next, so nothing jumps at a cut.
+
 Transitions are **added** time: they are silent and play before the next slide's narration, so they never overlap speech or subtitles.
 The first slide of a rendered range has no incoming transition, and the last slide simply ends.
 Output goes to `Projects/<project>/video/<name>_slides_AAA-BBB_<timestamp>.mp4`, plus `.srt` and `.json`.
@@ -345,7 +399,8 @@ src/
     content/                Importers (PDF, PPTX, DOCX, MD, text, code), slide builder, deck renderer, topic profiles/
     slides/                 PDF parsing, slide image rendering, validation
     narration/              Narration management and script checks
-    tts/                    TTS engines (Kokoro, Piper, macOS say), registry, audio service;
+    audio/                  Audio Studio backend: tag parser (script.py), segments/assembly/export (studio.py)
+    tts/                    TTS engines (Kokoro, Piper, macOS say), registry, audio service, emotion.py (styles);
                             custom/ = imported-model format detection + library
     video/                  timing.py (planning), transitions.py (effects), pipeline.py (render + preview)
     workers/                Background QThread workers (import, render, TTS, video, preview)
@@ -390,6 +445,8 @@ output/day1_video_lecture/  Example companion lecture package and its build scri
 - Packaged installers (PyInstaller or similar) and per-user project workspace outside the app folder.
 - More imported-model formats (e.g. sherpa-onnx), Piper clause-pause control.
 - More transition effects and an optional fade-in/out at the start and end of a video.
+- Audio Studio: per-segment speaker tags (`[voice:…]`) for multi-voice dialogues; importing DOCX/PDF text.
+- Direct import of image folders for photo videos; per-type slide density (e.g. fewer words per slide for short-form); a TTS model with native emotion control.
 - Burned-in (hard) subtitles option in the UI.
 
 ---

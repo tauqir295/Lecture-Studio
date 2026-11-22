@@ -8,7 +8,7 @@ from __future__ import annotations
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -47,6 +47,10 @@ class Capabilities:
     pauses: bool = False          # adjustable sentence / clause pauses
     pronunciation: bool = True    # text-substitution dictionary (engine independent)
     emphasis: bool = False
+    expressiveness: bool = False  # adjustable intonation variation (see src/backend/tts/emotion.py)
+    styles: Tuple[str, ...] = ()  # delivery styles the model performs natively (emotion keys)
+    instructions: bool = False    # genuine instruction-based emotion, tone, speaking style and prosody controls
+    voice_design: bool = False    # supports prompt-based voice creation
 
 
 @dataclass
@@ -69,6 +73,8 @@ class TTSEngine(ABC):
         self._lock = threading.RLock()
         self._state: Optional[str] = None
         self._error = ""
+        self._expressiveness = 1.0     # set per call by synthesize(); read by engines that support it
+        self._style = ""
 
     # ---- lifecycle
     @abstractmethod
@@ -120,13 +126,32 @@ class TTSEngine(ABC):
         ...
 
     def synthesize(self, text: str, speaker: str, speed: float = 1.0,
-                   sentence_pause: float = 0.3, clause_pause: float = 0.1) -> Tuple[np.ndarray, int]:
+                   sentence_pause: float = 0.3, clause_pause: float = 0.1,
+                   expressiveness: float = 1.0, style: str = "") -> Tuple[np.ndarray, int]:
+        """`expressiveness` is used only if capabilities.expressiveness; `style` only if it is in
+        capabilities.styles. Engines read them from self._expressiveness / self._style."""
         lo, hi = self.capabilities.speed_range
         speed = min(max(speed, lo), hi)
         self.load()
         with self._lock:
-            return self._synthesize(text, speaker, speed, sentence_pause, clause_pause)
+            self._expressiveness = expressiveness if self.capabilities.expressiveness else 1.0
+            self._style = style if style in self.capabilities.styles else ""
+            try:
+                return self._synthesize(text, speaker, speed, sentence_pause, clause_pause)
+            finally:
+                self._expressiveness, self._style = 1.0, ""
 
     def sample_sentence(self, speaker: str) -> str:
         return ("Hello! This is a sample of my voice. In this tutorial we will explore the topic "
                 "step by step, with clear explanations and practical examples.")
+
+    def download(self, progress: Optional[Callable[[int, str], None]] = None,
+                 cancel: Callable[[], bool] = lambda: False) -> None:
+        raise NotImplementedError("This engine does not support downloading.")
+
+    def verify(self) -> Tuple[bool, str]:
+        ok, why = self.is_installed()
+        return ok, "Verified and ready for offline inference." if ok else why
+
+    def remove(self) -> bool:
+        return False

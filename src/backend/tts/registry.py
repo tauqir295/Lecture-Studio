@@ -41,7 +41,11 @@ def models_root() -> Path:
 def _build() -> Dict[str, TTSEngine]:
     from src.backend.tts.kokoro_engine import KokoroEngine
     from src.backend.tts.say_engine import SayEngine
-    engines = [KokoroEngine(models_root() / "tts" / "kokoro-82m"), SayEngine()]
+    from src.backend.tts.qwen3_engine import build_qwen3_engines
+    tts_root = models_root() / "tts"
+    engines: List[TTSEngine] = [KokoroEngine(tts_root / "kokoro-82m")]
+    engines += build_qwen3_engines(tts_root)
+    engines.append(SayEngine())
     engines += custom_engines()
     return {e.id: e for e in engines}
 
@@ -62,6 +66,12 @@ def custom_engines() -> List[TTSEngine]:
     return out
 
 
+def reset() -> None:
+    """Completely clear cached engines."""
+    global _ENGINES
+    _ENGINES = None
+
+
 def reload() -> None:
     """Rebuild the engine list after models are imported, renamed or removed (keeps loaded engines)."""
     global _ENGINES
@@ -69,7 +79,10 @@ def reload() -> None:
     new = _build()
     for eid, eng in new.items():           # keep already-loaded built-in engines (avoid reloading weights)
         if eid in old and not getattr(eng, "custom", False):
-            new[eid] = old[eid]
+            old_root = getattr(old[eid], "model_dir", getattr(old[eid], "tts_root", None))
+            new_root = getattr(eng, "model_dir", getattr(eng, "tts_root", None))
+            if old_root == new_root and old[eid]._state == "ready":
+                new[eid] = old[eid]
     _ENGINES = new
 
 

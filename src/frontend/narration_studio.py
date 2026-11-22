@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from src.backend.narration.narration_manager import NarrationManager
 from src.backend.project_manager import ProjectManager
 from src.backend.tts import base as tb
+from src.backend.tts import emotion
 from src.backend.tts import service as tts
 from src.backend.tts import registry
 from src.backend.tts.registry import engines, get_engine, has_engine
@@ -141,6 +142,16 @@ class NarrationStudio(QWidget):
         self.lbl_slide_speaker = QLabel("")
         self.lbl_slide_speaker.setStyleSheet("color: #9ca3af;")
         hdr.addWidget(self.lbl_slide_speaker)
+        hdr.addWidget(QLabel("Style:"))
+        self.combo_slide_style = QComboBox()
+        self.combo_slide_style.setAccessibleName("Delivery style for this slide")
+        self.combo_slide_style.setToolTip("Delivery style for this slide only. 'Project style' follows the "
+                                          "Delivery style setting in the Speech panel.")
+        self.combo_slide_style.addItem("Project style", None)
+        for st in emotion.styles():
+            self.combo_slide_style.addItem(st.label, st.key)
+        self.combo_slide_style.currentIndexChanged.connect(self._on_slide_style_changed)
+        hdr.addWidget(self.combo_slide_style)
         self.script_status_badge = StatusBadge()
         hdr.addWidget(self.script_status_badge)
         cp.addLayout(hdr)
@@ -264,10 +275,6 @@ class NarrationStudio(QWidget):
         self.lbl_speaker_scope = QLabel("Applies to: all slides")
         self.lbl_speaker_scope.setStyleSheet("color: #fbbf24;")
         f.addWidget(self.lbl_speaker_scope)
-        self.chk_english = QCheckBox("English voices only")
-        self.chk_english.setChecked(True)
-        self.chk_english.toggled.connect(self._refresh_speakers)
-        f.addWidget(self.chk_english)
         self.combo_speaker = QComboBox()
         self.combo_speaker.setAccessibleName("Speaker")
         self.combo_speaker.currentIndexChanged.connect(self._on_speaker_changed)
@@ -311,6 +318,17 @@ class NarrationStudio(QWidget):
         # 5. Speech controls (capability-driven)
         g = QGroupBox("Speech")
         self.speech_form = QFormLayout(g)
+        self.combo_style = QComboBox()
+        self.combo_style.setAccessibleName("Delivery style")
+        for st in emotion.styles():
+            self.combo_style.addItem(st.label, st.key)
+            self.combo_style.setItemData(self.combo_style.count() - 1, st.description, Qt.ToolTipRole)
+        self.combo_style.currentIndexChanged.connect(self._on_style_changed)
+        self.speech_form.addRow("Delivery style:", self.combo_style)
+        self.lbl_style_support = QLabel("")
+        self.lbl_style_support.setWordWrap(True)
+        self.lbl_style_support.setStyleSheet("color: #6b7280; font-size: 11px;")
+        self.speech_form.addRow(self.lbl_style_support)
         self.spin_speed = self._dspin(0.5, 2.0, 0.05, 1.0, "×")
         self.spin_sentence = self._dspin(0.0, 2.0, 0.05, 0.3, " s")
         self.spin_clause = self._dspin(0.0, 1.0, 0.05, 0.1, " s")
@@ -377,8 +395,10 @@ class NarrationStudio(QWidget):
         self._busy_ui = True
         self._rebuild_engine_combo()
         self._set_engine_warning("")
-        if cfg.tts_engine and not has_engine(cfg.tts_engine):
-            self._fallback_from_missing_engine(cfg.tts_engine)
+        if cfg.tts_engine:
+            eng = get_engine(cfg.tts_engine)
+            if not has_engine(cfg.tts_engine) or (eng.id != registry.DEFAULT_ENGINE and not eng.is_installed()[0]):
+                self._fallback_from_missing_engine(cfg.tts_engine)
         eng = get_engine(cfg.tts_engine)
         cfg.tts_engine = eng.id
         self.combo_engine.setCurrentIndex(max(self.combo_engine.findData(eng.id), 0))
@@ -387,6 +407,7 @@ class NarrationStudio(QWidget):
         self.spin_speed.setValue(cfg.speech_speed)
         self.spin_sentence.setValue(cfg.sentence_pause)
         self.spin_clause.setValue(cfg.clause_pause)
+        self.combo_style.setCurrentIndex(max(self.combo_style.findData(emotion.get(cfg.emotion).key), 0))
         self._busy_ui = False
         self._refresh_engine_panel()
         self._refresh_list()
@@ -446,6 +467,7 @@ class NarrationStudio(QWidget):
             if img_path.is_file():
                 pix = QPixmap(str(img_path))
                 self.preview_label.setPixmap(pix.scaled(560, 315, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.combo_slide_style.setCurrentIndex(max(self.combo_slide_style.findData(narration.emotion), 0))
         self._is_populating = False
         self._sync_speaker_combo()
         self._update_slide_audio_label()
@@ -526,6 +548,7 @@ class NarrationStudio(QWidget):
         self.spin_speed.setRange(*caps.speed_range)
         unsupported = [n for n, ok in (("pause control", caps.pauses), ("emphasis", caps.emphasis)) if not ok]
         self.lbl_caps.setText("Not supported by this model: " + ", ".join(unsupported) if unsupported else "")
+        self.lbl_style_support.setText(emotion.describe_support(eng))
         self._refresh_speakers()
 
     def _on_engine_changed(self) -> None:
@@ -582,8 +605,10 @@ class NarrationStudio(QWidget):
 
     def _on_models_changed(self) -> None:
         registry.reload()                     # cheap; keeps this correct whoever changed the library
-        if self.project and not has_engine(self.project.settings.tts_engine):
-            self._fallback_from_missing_engine(self.project.settings.tts_engine)
+        if self.project:
+            eng = get_engine(self.project.settings.tts_engine)
+            if not has_engine(self.project.settings.tts_engine) or (eng.id != registry.DEFAULT_ENGINE and not eng.is_installed()[0]):
+                self._fallback_from_missing_engine(self.project.settings.tts_engine)
         self._rebuild_engine_combo()
         self._refresh_engine_panel()
         self._refresh_list()
@@ -596,8 +621,9 @@ class NarrationStudio(QWidget):
     def _on_engine_action(self) -> None:
         eng = self.current_engine()
         if eng.status().state == tb.NOT_INSTALLED and eng.downloadable:
+            sz = getattr(getattr(eng, "spec", None), "approx_size_str", "~350 MB")
             ans = QMessageBox.question(self, "Download model",
-                                       f"Download {eng.name} model files (~340 MB) once? After that, narration "
+                                       f"Download {eng.name} model files ({sz}) once? After that, narration "
                                        "works offline.", QMessageBox.Yes | QMessageBox.No)
             if ans == QMessageBox.Yes:
                 self._run("download", lambda p, c: eng.download(p, c), lambda _: self._refresh_engine_panel())
@@ -608,11 +634,7 @@ class NarrationStudio(QWidget):
 
     # ================================================================== speakers
     def _speaker_list(self) -> List[tb.Speaker]:
-        sp = self.current_engine().speakers()
-        if self.chk_english.isChecked():
-            en = [s for s in sp if s.is_english]
-            sp = en or sp
-        return sp
+        return self.current_engine().speakers()
 
     def _refresh_speakers(self) -> None:
         self._busy_ui, prev = True, self._busy_ui
@@ -804,6 +826,24 @@ class NarrationStudio(QWidget):
         self._update_slide_audio_label()
         self._update_audio_counts()
 
+    def _on_style_changed(self) -> None:
+        if self._busy_ui or not self.project:
+            return
+        self.project.settings.emotion = self.combo_style.currentData()
+        self._save_project()
+        self._update_slide_audio_label()
+        self._update_audio_counts()
+
+    def _on_slide_style_changed(self) -> None:
+        if self._is_populating or not self.project or not self.current_slide_id:
+            return
+        n = self.project.get_narration_by_id(self.current_slide_id)
+        if n:
+            n.emotion = self.combo_slide_style.currentData()
+            self._save_project()
+            self._update_slide_audio_label()
+            self._update_audio_counts()
+
     def _edit_pronunciations(self) -> None:
         if not self.project:
             return
@@ -840,9 +880,11 @@ class NarrationStudio(QWidget):
             return
         speaker = (self.combo_speaker.currentData() if sid == self.current_slide_id
                    else tts.slide_speaker(self.project, n))
-        self._run("preview", lambda p, c: (p(20, f"Reading slide {n.slide_number} with {speaker}…"),
-                                            tts.preview_audio(self.project, text, speaker))[1],
-                  lambda path: self.player.play(path, f"slide {n.slide_number} · {speaker}"))
+        style = tts.slide_emotion(self.project, n)
+        label = emotion.get(style).label
+        self._run("preview", lambda p, c: (p(20, f"Reading slide {n.slide_number} with {speaker} ({label})…"),
+                                            tts.preview_audio(self.project, text, speaker, style))[1],
+                  lambda path: self.player.play(path, f"slide {n.slide_number} · {speaker} · {label}"))
 
     def _play_slide_audio(self) -> None:
         n = self.project.get_narration_by_id(self.current_slide_id) if self.project and self.current_slide_id else None

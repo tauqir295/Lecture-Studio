@@ -60,8 +60,8 @@ def sample_project(temp_workspace):
 def test_main_window_init(qapp, temp_workspace):
     window = MainWindow(workspace_root=temp_workspace)
     assert window.windowTitle() == "PPT Lecture Studio"
-    assert window.sidebar.count() == 6
-    assert window.pages.count() == 6
+    assert window.sidebar.count() == 7
+    assert window.pages.count() == 7
     window.close()
 
 

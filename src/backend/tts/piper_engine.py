@@ -67,7 +67,8 @@ def phonemes_to_ids(phonemes: str, id_map: Dict[str, List[int]], phoneme_map: Op
 
 
 class PiperEngine(TTSEngine):
-    capabilities = Capabilities(speed_range=(0.5, 2.0), pauses=False, pronunciation=True, emphasis=False)
+    capabilities = Capabilities(speed_range=(0.5, 2.0), pauses=False, pronunciation=True, emphasis=False,
+                                expressiveness=True)
     custom = True
 
     def __init__(self, model_path: Path, config_path: Path, engine_id: str, name: str,
@@ -148,8 +149,9 @@ class PiperEngine(TTSEngine):
     def _synthesize(self, text, speaker, speed, sentence_pause, clause_pause):
         cfg = self.config
         inf = cfg.get("inference", {})
-        scales = np.array([inf.get("noise_scale", 0.667), float(inf.get("length_scale", 1.0)) / max(speed, 0.1),
-                           inf.get("noise_w", 0.8)], dtype=np.float32)
+        e = min(max(self._expressiveness, 0.3), 2.0)       # intonation variation (delivery style)
+        scales = np.array([inf.get("noise_scale", 0.667) * e, float(inf.get("length_scale", 1.0)) / max(speed, 0.1),
+                           min(inf.get("noise_w", 0.8) * e, 1.5)], dtype=np.float32)
         sid = self._speaker_index(speaker)
         names = {i.name for i in self._session.get_inputs()}
         gap = np.zeros(int(self.sample_rate * SENTENCE_GAP), dtype=np.float32)

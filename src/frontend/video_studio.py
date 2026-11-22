@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import QItemSelectionModel, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QImage, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton,
@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
 
 from src.backend.project_manager import ProjectManager
 from src.backend.video import transitions as tx
-from src.backend.video.pipeline import list_generated, missing_tools
+from src.backend.video import video_types as vt
+from src.backend.video.pipeline import layout_preview_frame, list_generated, missing_tools
 from src.backend.tts import service as tts
 from src.backend.tts.registry import get_engine
 from src.backend.video.timing import RenderSettings, TimingPlan, fmt_duration, plan_timing, validate_range
@@ -108,6 +109,8 @@ class VideoStudio(QWidget):
         panel = QWidget()
         pl = QVBoxLayout(panel)
         pl.setSpacing(10)
+
+        pl.addWidget(self._build_video_type_group())
 
         g = QGroupBox("Slide range")
         f = QFormLayout(g)
@@ -269,6 +272,7 @@ class VideoStudio(QWidget):
             self.spin_to.setValue(total)
             self._apply_settings(self._load_last_settings())
         self._load_transitions()
+        self._load_video_type()
         self._loading = False
         self._refresh_videos()
         self._on_settings_changed()
@@ -442,6 +446,105 @@ class VideoStudio(QWidget):
         r = self.timeline_table.currentRow() + delta
         if 0 <= r < self.timeline_table.rowCount():
             self.timeline_table.setCurrentCell(r, 0)
+
+    # ------------------------------------------------------------------ video type
+    def _build_video_type_group(self) -> QGroupBox:
+        g = QGroupBox("Video type")
+        f = QFormLayout(g)
+        self.combo_type = QComboBox()
+        for t in vt.types():
+            self.combo_type.addItem(t.label, t.key)
+        self.combo_type.currentIndexChanged.connect(self._on_video_type_changed)
+        f.addRow("Type:", self.combo_type)
+        self.lbl_type_info = QLabel("")
+        self.lbl_type_info.setWordWrap(True)
+        self.lbl_type_info.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        f.addRow(self.lbl_type_info)
+        self.combo_aspect = QComboBox()
+        for a, (w, h) in vt.ASPECTS.items():
+            self.combo_aspect.addItem(f"{a}  ({w}×{h})", a)
+        self.combo_layout = QComboBox()
+        for k, label in vt.LAYOUTS.items():
+            self.combo_layout.addItem(label, k)
+        self.combo_overlay = QComboBox()
+        for k, label in vt.OVERLAYS.items():
+            self.combo_overlay.addItem(label, k)
+        for c in (self.combo_aspect, self.combo_layout, self.combo_overlay):
+            c.currentIndexChanged.connect(self._on_frame_settings_changed)
+        f.addRow("Frame:", self.combo_aspect)
+        f.addRow("Layout:", self.combo_layout)
+        f.addRow("Overlay:", self.combo_overlay)
+        self.btn_preview_frame = QPushButton("Preview frame")
+        self.btn_preview_frame.setToolTip("Show the selected slide with this frame shape, layout and overlay.")
+        self.btn_preview_frame.clicked.connect(self._preview_layout)
+        f.addRow(self.btn_preview_frame)
+        note = QLabel("A type sets defaults for frame, layout, transitions, pacing and delivery style. "
+                      "Everything stays editable; slides and narration text are not changed.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        f.addRow(note)
+        return g
+
+    def _type_info(self, t) -> str:
+        from src.backend.tts import emotion
+        return (f"{t.description}\nTip: {t.tips}\nDefaults: {t.aspect}, {vt.LAYOUTS[t.layout].lower()}, "
+                f"{tx.label(t.transition).lower()} transitions, {emotion.get(t.emotion).label.lower()} delivery.")
+
+    def _load_video_type(self) -> None:
+        vc = self.project.settings
+        was = self._loading
+        self._loading = True
+        self._set_combo(self.combo_type, vt.get(vc.video_type).key)
+        self._set_combo(self.combo_aspect, vc.aspect_ratio if vc.aspect_ratio in vt.ASPECTS else "16:9")
+        self._set_combo(self.combo_layout, vc.layout if vc.layout in vt.LAYOUTS else "fit")
+        self._set_combo(self.combo_overlay, vc.overlay if vc.overlay in vt.OVERLAYS else "none")
+        self.lbl_type_info.setText(self._type_info(vt.get(vc.video_type)))
+        self._loading = was
+
+    def _on_video_type_changed(self, *_) -> None:
+        if self._loading or not self.project:
+            return
+        t = vt.apply_to_config(self.project.settings, self.combo_type.currentData())
+        self._loading = True
+        self.spin_reading.setValue(t.reading_seconds)
+        self.spin_min_slide.setValue(t.min_slide_seconds)
+        self.spin_speed.setValue(t.speed)
+        self._loading = False
+        self._load_video_type()
+        self._load_transitions()
+        self._transitions_changed()          # saves the project and refreshes the estimate
+
+    def _on_frame_settings_changed(self, *_) -> None:
+        if self._loading or not self.project:
+            return
+        vc = self.project.settings
+        vt.set_aspect(vc, self.combo_aspect.currentData())
+        vc.layout = self.combo_layout.currentData()
+        vc.overlay = self.combo_overlay.currentData()
+        self._transitions_changed()
+
+    def _preview_layout(self) -> None:
+        if not self.plan or not self.plan.slides:
+            return
+        row = max(self.timeline_table.currentRow(), 0)
+        st = self.plan.slides[min(row, len(self.plan.slides) - 1)]
+        self._stop_animation()
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            data, w, h = layout_preview_frame(self.project, st.slide_id, 640)
+        except Exception as exc:
+            QMessageBox.warning(self, "Preview Failed", str(exc))
+            return
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        self._preview_bytes = data                      # QImage does not copy the buffer
+        img = QImage(data, w, h, w * 3, QImage.Format_RGB888)
+        self.video_display.setPixmap(QPixmap.fromImage(img).scaled(
+            self.video_display.width() or 640, self.video_display.height() or 360,
+            Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        vc = self.project.settings
+        self.lbl_preview.setText(f"Frame preview · slide {st.slide_number} · {vc.aspect_ratio} · "
+                                 f"{vt.LAYOUTS.get(vc.layout, vc.layout)} · overlay: {vt.OVERLAYS.get(vc.overlay, vc.overlay)}")
 
     # ------------------------------------------------------------------ transitions
     @staticmethod

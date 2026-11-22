@@ -1,24 +1,138 @@
-"""Manage custom (user-imported) local TTS models: import, name, inspect, remove."""
+"""TTS Model Manager: manage downloadable neural models (Kokoro-82M, Qwen3-TTS) and imported custom models."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QTabWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from src.backend.tts import registry
 from src.backend.tts.custom import CustomModelStore, Detection, ModelStoreError, detect
 from src.backend.tts.custom.formats import supported_formats_help
+from src.backend.tts.qwen3_manager import MODEL_SPECS, Qwen3Manager, format_bytes, _dir_size
 
 
 def _mb(n: int) -> str:
     return f"{n / 1e6:.0f} MB" if n >= 1e6 else f"{n / 1e3:.0f} KB"
+
+
+class DownloadProgressDialog(QDialog):
+    """Visual progress dialog for downloading model components."""
+
+    cancelled = Signal()
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(450)
+        self._is_cancelled = False
+        lay = QVBoxLayout(self)
+        self.lbl_status = QLabel("Preparing download...")
+        self.lbl_status.setWordWrap(True)
+        lay.addWidget(self.lbl_status)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        lay.addWidget(self.bar)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        bb = QHBoxLayout()
+        bb.addStretch()
+        bb.addWidget(self.btn_cancel)
+        lay.addLayout(bb)
+
+    def set_progress(self, pct: int, msg: str) -> None:
+        self.bar.setValue(max(0, min(100, pct)))
+        self.lbl_status.setText(msg)
+        QGuiApplication.processEvents()
+
+    def _on_cancel(self) -> None:
+        self._is_cancelled = True
+        self.lbl_status.setText("Cancelling download...")
+        self.btn_cancel.setEnabled(False)
+        self.cancelled.emit()
+
+    def is_cancelled(self) -> bool:
+        return self._is_cancelled
+
+
+class Qwen3SettingsDialog(QDialog):
+    """Model-specific settings for Qwen3-TTS instruction and voice design controls."""
+
+    def __init__(self, manager: Qwen3Manager, model_id: str, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.model_id = model_id
+        spec = MODEL_SPECS.get(model_id)
+        name = spec.name if spec else model_id
+        self.setWindowTitle(f"Settings — {name}")
+        self.setMinimumWidth(500)
+        self.settings = self.manager.load_settings(model_id)
+
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+
+        info = QLabel(
+            "Qwen3-TTS models follow natural-language instructions for emotion, tone, speaking style, and prosody. "
+            "You can specify global instruction preferences below."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        lay.addWidget(info)
+
+        self.edit_instruct = QTextEdit()
+        self.edit_instruct.setPlaceholderText(
+            "e.g. 'Speak in a calm academic tone with clear diction and measured pauses.'"
+        )
+        self.edit_instruct.setPlainText(self.settings.get("custom_instruction", ""))
+        self.edit_instruct.setMaximumHeight(80)
+        form.addRow("Custom Instruction:", self.edit_instruct)
+
+        self.edit_voice_design = None
+        if spec and spec.is_voice_design:
+            self.edit_voice_design = QTextEdit()
+            self.edit_voice_design.setPlaceholderText(
+                "e.g. 'A clear, warm, and articulate female academic lecturer with calm, confident pacing.'"
+            )
+            self.edit_voice_design.setPlainText(self.settings.get("voice_design_prompt", ""))
+            self.edit_voice_design.setMaximumHeight(80)
+            form.addRow("Voice Design Prompt:", self.edit_voice_design)
+
+        self.combo_device = QComboBox()
+        self.combo_device.addItems(["CPU (Offline)", "Auto (MPS / GPU if available)"])
+        cur_dev = self.settings.get("device", "cpu")
+        self.combo_device.setCurrentIndex(1 if "auto" in cur_dev.lower() or "mps" in cur_dev.lower() else 0)
+        form.addRow("Compute Device:", self.combo_device)
+
+        self.spin_rate = QDoubleSpinBox()
+        self.spin_rate.setRange(0.5, 2.0)
+        self.spin_rate.setSingleStep(0.05)
+        self.spin_rate.setValue(float(self.settings.get("speaking_rate", 1.0)))
+        self.spin_rate.setSuffix("×")
+        form.addRow("Speaking Rate:", self.spin_rate)
+
+        lay.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._save)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _save(self) -> None:
+        self.settings["custom_instruction"] = self.edit_instruct.toPlainText().strip()
+        if self.edit_voice_design:
+            self.settings["voice_design_prompt"] = self.edit_voice_design.toPlainText().strip()
+        self.settings["device"] = "auto" if self.combo_device.currentIndex() == 1 else "cpu"
+        self.settings["speaking_rate"] = round(self.spin_rate.value(), 2)
+        self.manager.save_settings(self.model_id, self.settings)
+        self.accept()
 
 
 class ImportModelDialog(QDialog):
@@ -65,7 +179,7 @@ class ImportModelDialog(QDialog):
 
 
 class ModelManagerDialog(QDialog):
-    """List of imported models. Emits `models_changed` after any change (registry already reloaded)."""
+    """TTS Model Manager supporting downloadable neural engines (Kokoro-82M, Qwen3-TTS) and imported models."""
 
     models_changed = Signal()
     use_model = Signal(str)          # engine id to select in Narration Studio
@@ -74,13 +188,92 @@ class ModelManagerDialog(QDialog):
                  run_task: Optional[Callable] = None, parent=None):
         super().__init__(parent)
         self.store = store or CustomModelStore()
-        self.in_use = in_use                    # engine id used by the open project
+        self.in_use = in_use                    # engine id used by open project
         self.run_task = run_task                # (fn(progress, cancel), on_done) -> runs in background
-        self.setWindowTitle("Custom TTS Models")
-        self.resize(820, 440)
-        lay = QVBoxLayout(self)
-        intro = QLabel("Import TTS models you have downloaded. They run locally and appear in the TTS Model list "
-                       "next to Kokoro-82M, for one speaker or per-slide speakers.")
+        self.tts_root = registry.models_root() / "tts"
+        self.qwen3_mgr = Qwen3Manager(self.tts_root)
+
+        self.setWindowTitle("TTS Model Manager")
+        self.resize(880, 520)
+        root_lay = QVBoxLayout(self)
+
+        self.tabs = QTabWidget()
+        root_lay.addWidget(self.tabs, 1)
+
+        # Tab 1: Managed Neural Models (Kokoro & Qwen3-TTS)
+        self.tabs.addTab(self._build_managed_tab(), "TTS Models Library")
+
+        # Tab 2: User-Imported Custom Models (Piper & ONNX)
+        self.tabs.addTab(self._build_custom_tab(), "Imported Custom Models")
+
+        # Bottom Close Row
+        close_row = QHBoxLayout()
+        self.lbl_storage_info = QLabel("")
+        self.lbl_storage_info.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        close_row.addWidget(self.lbl_storage_info)
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_row.addWidget(close_btn)
+        root_lay.addLayout(close_row)
+
+        self.refresh()
+
+    # ================================================================== Tab 1: Managed Models
+    def _build_managed_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        intro = QLabel(
+            "Select, download, verify and configure local TTS models. Once downloaded, all models run "
+            "100% offline without sending audio or data to external servers."
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+
+        self.managed_table = QTableWidget(0, 5)
+        self.managed_table.setHorizontalHeaderLabels(["Model Name", "Variant", "Model Size", "Disk Usage", "Status"])
+        hh = self.managed_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        for c in (1, 2, 3, 4):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        self.managed_table.verticalHeader().setVisible(False)
+        self.managed_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.managed_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.managed_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.managed_table.itemSelectionChanged.connect(self._update_managed_buttons)
+        self.managed_table.cellDoubleClicked.connect(lambda *_: self._use_selected_managed())
+        lay.addWidget(self.managed_table, 1)
+
+        self.lbl_managed_detail = QLabel("")
+        self.lbl_managed_detail.setWordWrap(True)
+        self.lbl_managed_detail.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        self.lbl_managed_detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(self.lbl_managed_detail)
+
+        row = QHBoxLayout()
+        self.btn_download_managed = QPushButton("Download / Install")
+        self.btn_download_managed.clicked.connect(self._download_selected_managed)
+        self.btn_verify_managed = QPushButton("Verify Integrity")
+        self.btn_verify_managed.clicked.connect(self._verify_selected_managed)
+        self.btn_use_managed = QPushButton("Use in Narration Studio")
+        self.btn_use_managed.clicked.connect(self._use_selected_managed)
+        self.btn_settings_managed = QPushButton("Model Settings…")
+        self.btn_settings_managed.clicked.connect(self._settings_selected_managed)
+        self.btn_remove_managed = QPushButton("Remove / Free Space")
+        self.btn_remove_managed.clicked.connect(self._remove_selected_managed)
+
+        for b in (self.btn_download_managed, self.btn_verify_managed, self.btn_use_managed,
+                  self.btn_settings_managed, self.btn_remove_managed):
+            row.addWidget(b)
+        row.addStretch()
+        lay.addLayout(row)
+        return w
+
+    # ================================================================== Tab 2: Custom Models
+    def _build_custom_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        intro = QLabel("Import Piper voices or Kokoro-compatible ONNX models you have downloaded.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
 
@@ -97,6 +290,7 @@ class ModelManagerDialog(QDialog):
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.table.cellDoubleClicked.connect(lambda *_: self._use_selected())
         lay.addWidget(self.table, 1)
+
         self.lbl_detail = QLabel("")
         self.lbl_detail.setWordWrap(True)
         self.lbl_detail.setStyleSheet("color: #9ca3af; font-size: 11px;")
@@ -115,13 +309,56 @@ class ModelManagerDialog(QDialog):
             row.addWidget(b)
         row.addStretch(); row.addWidget(self.btn_help)
         lay.addLayout(row)
-        close = QDialogButtonBox(QDialogButtonBox.Close)
-        close.rejected.connect(self.reject)
-        lay.addWidget(close)
-        self.refresh()
+        return w
 
-    # ------------------------------------------------------------------ list
+    # ================================================================== refresh & state
     def refresh(self) -> None:
+        self._refresh_managed()
+        self._refresh_custom()
+
+    def _refresh_managed(self) -> None:
+        managed_list = [
+            ("kokoro-82m", "Kokoro-82M", "82M Neural TTS", "~353 MB"),
+            ("qwen3-tts-0.6b-customvoice", "Qwen3-TTS 0.6B CustomVoice", "0.6B Multilingual + Style Instruct", "1.2 GB"),
+            ("qwen3-tts-1.7b-customvoice", "Qwen3-TTS 1.7B CustomVoice", "1.7B Multilingual + Style Instruct", "3.4 GB"),
+            ("qwen3-tts-1.7b-voicedesign", "Qwen3-TTS 1.7B VoiceDesign", "1.7B Zero-Shot Voice Design", "3.4 GB"),
+        ]
+
+        self.managed_table.setRowCount(len(managed_list))
+        for r, (mid, name, variant, sz) in enumerate(managed_list):
+            eng = registry.get_engine(mid)
+            in_use = (mid == self.in_use())
+            name_txt = name + ("  (in use)" if in_use else "")
+            ok, why = eng.is_installed() if eng else (False, "Not available")
+
+            if ok:
+                status = "ready to use"
+            elif eng and eng.downloadable:
+                status = "not installed"
+            else:
+                status = "cannot run"
+
+            if mid == "kokoro-82m":
+                kdir = self.tts_root / "kokoro-82m"
+                usage = _dir_size(kdir) if kdir.is_dir() else 0
+            else:
+                usage = self.qwen3_mgr.disk_usage(mid)
+
+            vals = [name_txt, variant, sz, format_bytes(usage) if usage > 0 else "—", status]
+            for c, val in enumerate(vals):
+                it = QTableWidgetItem(val)
+                it.setData(Qt.UserRole, mid)
+                self.managed_table.setItem(r, c, it)
+
+        # Storage summary
+        tot = self.qwen3_mgr.total_disk_usage()
+        kdir = self.tts_root / "kokoro-82m"
+        if kdir.is_dir():
+            tot += _dir_size(kdir)
+        self.lbl_storage_info.setText(f"💾 Local TTS Models Storage: {format_bytes(tot)} in {self.tts_root}")
+        self._update_managed_buttons()
+
+    def _refresh_custom(self) -> None:
         entries = self.store.entries()
         engines = {e.id: e for e in registry.engines()}
         self.table.setRowCount(len(entries))
@@ -144,6 +381,125 @@ class ModelManagerDialog(QDialog):
                 self.table.setItem(r, c, it)
         self._update_buttons()
 
+    # ================================================================== Managed Model Actions
+    def selected_managed_id(self) -> Optional[str]:
+        rows = self.managed_table.selectionModel().selectedRows()
+        return self.managed_table.item(rows[0].row(), 0).data(Qt.UserRole) if rows else None
+
+    def _update_managed_buttons(self) -> None:
+        mid = self.selected_managed_id()
+        for b in (self.btn_download_managed, self.btn_verify_managed, self.btn_use_managed,
+                  self.btn_settings_managed, self.btn_remove_managed):
+            b.setEnabled(mid is not None)
+
+        if not mid:
+            self.lbl_managed_detail.setText("")
+            return
+
+        eng = registry.get_engine(mid)
+        ok, why = eng.is_installed() if eng else (False, "Not available")
+
+        if ok:
+            self.btn_download_managed.setText("Re-install / Update")
+        else:
+            self.btn_download_managed.setText("Download / Install")
+
+        self.btn_settings_managed.setVisible(mid.startswith("qwen3"))
+
+        detail_lines = [f"**{eng.name}**"]
+        detail_lines.append(eng.description)
+        if mid.startswith("qwen3"):
+            spec = MODEL_SPECS.get(mid)
+            tok_ok, tok_msg = self.qwen3_mgr.is_tokenizer_installed()
+            detail_lines.append(f"• Components: {len(spec.required_files) if spec else 3} model files + Qwen3 Tokenizer ({'ready' if tok_ok else 'missing'}).")
+            detail_lines.append("• Emotion & Tone: Genuine instruction-based delivery tags ([happy], [sad], [whispering], [calm], etc.).")
+            detail_lines.append(f"• Offline location: {self.qwen3_mgr.model_dir(mid)}")
+        elif mid == "kokoro-82m":
+            detail_lines.append("• Components: kokoro-v1.0.onnx + voices-v1.0.bin (54 voices).")
+            detail_lines.append(f"• Offline location: {self.tts_root / 'kokoro-82m'}")
+
+        if not ok and why:
+            detail_lines.append(f"⚠ Status: {why}")
+
+        self.lbl_managed_detail.setText("\n".join(detail_lines))
+
+    def _download_selected_managed(self) -> None:
+        mid = self.selected_managed_id()
+        if not mid:
+            return
+        eng = registry.get_engine(mid)
+        if not eng or not eng.downloadable:
+            QMessageBox.warning(self, "Download", "This engine does not support automatic downloading.")
+            return
+
+        dlg = DownloadProgressDialog(f"Download {eng.name}", self)
+
+        def do_download():
+            eng.download(progress=dlg.set_progress, cancel=dlg.is_cancelled)
+
+        if self.run_task:
+            self.run_task(lambda p, c: eng.download(p, c), lambda _r: self._changed())
+        else:
+            try:
+                do_download()
+                QMessageBox.information(self, "Download Complete", f"✓ {eng.name} installed and ready for offline use.")
+            except Exception as exc:
+                QMessageBox.critical(self, "Download Failed", str(exc))
+            finally:
+                self._changed()
+
+    def _verify_selected_managed(self) -> None:
+        mid = self.selected_managed_id()
+        if not mid:
+            return
+        eng = registry.get_engine(mid)
+        if not eng:
+            return
+
+        ok, msg = eng.verify()
+        if ok:
+            QMessageBox.information(self, "Model Verification", f"✓ {msg}")
+        else:
+            QMessageBox.warning(self, "Model Verification", f"⚠ Verification failed:\n\n{msg}")
+
+    def _use_selected_managed(self) -> None:
+        mid = self.selected_managed_id()
+        if mid:
+            self.use_model.emit(mid)
+            self.accept()
+
+    def _settings_selected_managed(self) -> None:
+        mid = self.selected_managed_id()
+        if mid and mid.startswith("qwen3"):
+            dlg = Qwen3SettingsDialog(self.qwen3_mgr, mid, self)
+            dlg.exec()
+
+    def _remove_selected_managed(self) -> None:
+        mid = self.selected_managed_id()
+        if not mid:
+            return
+        eng = registry.get_engine(mid)
+        if not eng:
+            return
+
+        used = (mid == self.in_use())
+        warn = "\n\n⚠ This model is currently in use by the open project. Removing it will switch the project to Kokoro-82M." if used else ""
+        ans = QMessageBox.question(
+            self, "Remove Model Files",
+            f"Remove local files for “{eng.name}” to free disk space?{warn}",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if ans == QMessageBox.Yes:
+            if mid.startswith("qwen3"):
+                self.qwen3_mgr.remove_model(mid, remove_tokenizer_if_unused=True)
+            elif mid == "kokoro-82m":
+                kdir = self.tts_root / "kokoro-82m"
+                if kdir.is_dir():
+                    import shutil
+                    shutil.rmtree(kdir, ignore_errors=True)
+            self._changed()
+
+    # ================================================================== Custom Model Actions
     def selected_id(self) -> Optional[str]:
         rows = self.table.selectionModel().selectedRows()
         return self.table.item(rows[0].row(), 0).data(Qt.UserRole) if rows else None
@@ -170,7 +526,6 @@ class ModelManagerDialog(QDialog):
         self.refresh()
         self.models_changed.emit()
 
-    # ------------------------------------------------------------------ import
     def _import_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import TTS Model File", str(Path.home()),
                                               "TTS models (*.onnx *.json *.bin *.npz);;All files (*)")
@@ -238,7 +593,6 @@ class ModelManagerDialog(QDialog):
         self._changed()
         return entry
 
-    # ------------------------------------------------------------------ manage
     def _use_selected(self) -> None:
         mid = self.selected_id()
         if mid:

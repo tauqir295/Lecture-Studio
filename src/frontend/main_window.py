@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt
 from src.models.project import Project
 from src.backend.project_manager import ProjectManager
 from src.frontend.styles import DARK_THEME, LIGHT_THEME
+from src.frontend.audio_studio import AudioStudio
 from src.frontend.dashboard_page import DashboardPage
 from src.frontend.project_wizard import ProjectWizard
 from src.frontend.import_analysis_page import ImportAnalysisPage
@@ -113,6 +114,7 @@ class MainWindow(QMainWindow):
             "🖼️  Slide Studio",
             "🎙️  Narration Studio",
             "🎬  Video Studio",
+            "🎧  Audio Studio",
             "⚙️  Settings",
         ]
         self.sidebar.addItems(nav_items)
@@ -146,6 +148,10 @@ class MainWindow(QMainWindow):
 
         self.video_studio = VideoStudio()
         self.pages.addWidget(self.video_studio)
+
+        # Standalone: works without any project loaded
+        self.audio_studio = AudioStudio(self.workspace_root)
+        self.pages.addWidget(self.audio_studio)
 
         self.settings_page = SettingsPage()
         self.settings_page.theme_changed.connect(self.apply_theme)

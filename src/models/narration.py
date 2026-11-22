@@ -26,6 +26,7 @@ class SlideNarration:
     audio_status: str = "none"  # "none", "generating", "ready", "failed"
     error_message: Optional[str] = None
     speaker: Optional[str] = None  # per-slide speaker (used in "per_slide" mode)
+    emotion: Optional[str] = None  # per-slide delivery style; None = project default (src/backend/tts/emotion.py)
     audio_meta: Dict[str, Any] = field(default_factory=dict)  # what the audio was generated from
 
     def calculate_metrics(self, words_per_minute: int = 140) -> None:
